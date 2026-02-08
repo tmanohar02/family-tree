@@ -1,0 +1,8 @@
+# Private source data (keep out of repo)
+data/templates/*.csv
+
+data/derived/*.json
+
+# Local tooling
+node_modules/
+.DS_Store

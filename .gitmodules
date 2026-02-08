@@ -1,0 +1,3 @@
+[submodule "family-chart"]
+	path = family-chart
+	url = https://github.com/donatso/family-chart.git
