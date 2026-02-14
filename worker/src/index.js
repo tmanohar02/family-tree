@@ -158,7 +158,7 @@ async function loadState(env) {
 async function getFileContent(env, path, branch) {
   const owner = env.GITHUB_OWNER;
   const repo = env.GITHUB_REPO;
-  const res = await githubApi(env, `repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`);
+  const res = await githubApi(env, `repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`);
   const content = atob((res.content || "").replace(/\n/g, ""));
   return { sha: res.sha, content };
 }
@@ -589,6 +589,7 @@ async function githubApi(env, path, options = {}) {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${env.GITHUB_TOKEN}`,
       "x-github-api-version": "2022-11-28",
+      "user-agent": "family-tree-worker",
       "content-type": "application/json"
     },
     body: options.body ? JSON.stringify(options.body) : undefined
