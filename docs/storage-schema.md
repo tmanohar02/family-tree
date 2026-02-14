@@ -13,6 +13,7 @@ Columns:
 - `full_name` (required): display name
 - `birth_year` (optional): 4-digit year, e.g. `1984`
 - `gender` (optional): `M`, `F`, `X`, `U` (unknown)
+- `child_order` (optional): numeric sort order for siblings (smaller = earlier)
 
 Example:
 
@@ -56,3 +57,54 @@ R0003,P0001,P0002,spouse,1977,
 ## Notes
 - This schema intentionally limits personal details (name, birth year, gender).
 - If you later need adoption, guardianship, or step-relationships, we can extend `relation_type` and add a `relation_note` column.
+
+## TODO: Natural-Language Update Workflow
+
+Goal: Let a user submit plain text updates (for example, "Add X as spouse of Y"), show a confirmation diff, and apply changes to a single server-side source of truth with git commits.
+
+Reference implementation scaffold: see `docs/cloudflare-worker.md` and `worker/src/index.js`.
+
+### Phase 1: Server Source of Truth
+- [ ] Move authoritative data from local-only workflow to server-managed storage.
+- [ ] Keep canonical CSV files (`people.csv`, `relationships.csv`) in a server-side git repo.
+- [ ] Expose read API for current tree data and metadata (latest commit SHA, last update time).
+
+### Phase 2: LLM Change Proposal
+- [ ] Add endpoint to accept user text instructions.
+- [ ] Build prompt contract that returns structured operations, not free text.
+- [ ] Required operation types:
+  - `add_person`
+  - `update_person`
+  - `add_relationship`
+  - `update_relationship`
+  - `delete_relationship` (optional, but useful for corrections)
+- [ ] Require each operation to include machine-checkable fields (ids, names, relation types, confidence, assumptions).
+
+### Phase 3: Validation + Delta Preview
+- [ ] Validate proposed operations against schema and referential integrity.
+- [ ] Detect ambiguities (for example duplicate names) and return clarification questions.
+- [ ] Generate a user-facing delta preview before apply:
+  - rows to add
+  - rows to update
+  - rows to delete
+  - inferred links (for example spouse->parent assumptions) explicitly flagged
+- [ ] Require explicit user confirmation token before apply.
+
+### Phase 4: Apply + Git Commit
+- [ ] Apply approved operations to canonical CSV files server-side.
+- [ ] Re-run generator and encryption pipeline after apply.
+- [ ] Commit changes with deterministic commit message template:
+  - `data: apply natural-language update <request_id>`
+- [ ] Push commit to remote branch (`main`) and publish encrypted site payload.
+
+### Phase 5: Safety and Auditability
+- [ ] Persist request log: raw prompt, model response, validation result, approver, commit SHA.
+- [ ] Add rollback endpoint to revert to a prior commit SHA.
+- [ ] Add branch protection and token-scoped CI user for server commits.
+- [ ] Add PII-safe logging policy (never log passphrases, redact sensitive fields).
+
+### Acceptance Criteria
+- [ ] A plain-text instruction can be transformed into a valid proposal without editing files manually.
+- [ ] User sees exact deltas and can approve/reject before changes are applied.
+- [ ] Approved changes are committed and pushed automatically.
+- [ ] Live page reflects updated encrypted payload after publish.
