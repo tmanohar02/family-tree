@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Family Chart - Local CSV Demo</title>
+  <link rel="stylesheet" href="https://unpkg.com/family-chart@latest/dist/styles/family-chart.css">
+  <style>
+    :root {
+      --bg: #f6f3ee;
+      --ink: #1b1b1b;
+      --muted: #6b6b6b;
+      --card: #ffffff;
+      --male: #2a7bb8;
+      --female: #c4637a;
+      --neutral: #8b8b8b;
+      --line: rgba(30, 30, 30, 0.18);
+      --line-strong: rgba(30, 30, 30, 0.45);
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+      background: radial-gradient(1200px 800px at 70% -20%, #fffdf8 0%, var(--bg) 55%, #efe9e1 100%);
+      color: var(--ink);
+    }
+    #FamilyChart {
+      width: 100%;
+      height: 100vh;
+    }
+    .f3 .link {
+      stroke: var(--line) !important;
+      stroke-width: 2px !important;
+      opacity: 1 !important;
+    }
+    .f3 .link.f3-path-to-main {
+      stroke: var(--line-strong) !important;
+      stroke-width: 3px !important;
+    }
+    .f3 .card {
+      color: var(--ink);
+    }
+    .f3 .card-inner {
+      background: var(--card);
+      border-radius: 14px;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      overflow: hidden;
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+    .f3 .card-main .card-inner {
+      outline: 3px solid rgba(20, 20, 20, 0.85);
+      border-color: #111;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+    }
+    .avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-weight: 600;
+      color: white;
+      font-size: 18px;
+      letter-spacing: 0.5px;
+    }
+    .avatar.male { background: linear-gradient(160deg, #2d8bd0 0%, #1f5b85 100%); }
+    .avatar.female { background: linear-gradient(160deg, #d2798b 0%, #9e4f61 100%); }
+    .avatar.neutral { background: linear-gradient(160deg, #9a9a9a 0%, #6f6f6f 100%); }
+    .card-name {
+      font-size: 15px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+    .card-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .card-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 999px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-left: 6px;
+      background: rgba(30, 30, 30, 0.08);
+      color: #333;
+    }
+    .unlock {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: rgba(15, 15, 15, 0.35);
+      backdrop-filter: blur(6px);
+      z-index: 10;
+    }
+    .unlock-card {
+      width: min(420px, 90vw);
+      background: #fff;
+      border-radius: 16px;
+      padding: 22px;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.2);
+      border: 1px solid rgba(0,0,0,0.08);
+      text-align: left;
+    }
+    .unlock-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .unlock-subtitle {
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 14px;
+    }
+    .unlock-input {
+      width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .unlock-btn {
+      width: 100%;
+      background: #1f5b85;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .unlock-btn:hover { filter: brightness(1.05); }
+    .unlock-error {
+      color: #b3261e;
+      font-size: 12px;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="FamilyChart" class="f3"></div>
+  <div id="unlock" class="unlock">
+    <div class="unlock-card">
+      <div class="unlock-title">Unlock Family Tree</div>
+      <div class="unlock-subtitle">Enter the passphrase to decrypt your data.</div>
+      <input id="passphrase" class="unlock-input" type="password" placeholder="Passphrase" />
+      <button id="unlock-btn" class="unlock-btn">Unlock</button>
+      <div id="unlock-error" class="unlock-error"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/d3@7/dist/d3.min.js"></script>
+  <script src="https://unpkg.com/family-chart@latest/dist/family-chart.min.js"></script>
+  <script type="module">
+    const unlockEl = document.getElementById('unlock');
+    const passInput = document.getElementById('passphrase');
+    const unlockBtn = document.getElementById('unlock-btn');
+    const errorEl = document.getElementById('unlock-error');
+
+    unlockBtn.addEventListener('click', async () => {
+      errorEl.textContent = '';
+      const passphrase = passInput.value.trim();
+      if (!passphrase) {
+        errorEl.textContent = 'Passphrase is required.';
+        return;
+      }
+      try {
+        const data = await loadEncryptedData(passphrase);
+        initChart(data);
+        unlockEl.style.display = 'none';
+      } catch (err) {
+        errorEl.textContent = 'Incorrect passphrase or corrupted data.';
+        console.error(err);
+      }
+    });
+
+    async function loadEncryptedData(passphrase) {
+      const res = await fetch('./data.enc.20260214113511-ba54a7b.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error('Failed to load encrypted data');
+      const payload = await res.json();
+
+      const salt = b64ToBytes(payload.kdf.salt);
+      const iv = b64ToBytes(payload.cipher.iv);
+      const dataBytes = b64ToBytes(payload.data);
+
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(passphrase),
+        { name: 'PBKDF2' },
+        false,
+        ['deriveKey']
+      );
+      const key = await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt,
+          iterations: payload.kdf.iterations,
+          hash: payload.kdf.hash
+        },
+        keyMaterial,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt']
+      );
+
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        dataBytes
+      );
+
+      const json = new TextDecoder().decode(plaintext);
+      return JSON.parse(json);
+    }
+
+    function b64ToBytes(b64) {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    }
+
+    function initChart(data) {
+      const chart = window.f3.createChart('#FamilyChart', data);
+      chart
+        .setCardXSpacing(200)
+        .setCardYSpacing(140)
+        .setDuplicateBranchToggle(true)
+        .setSortChildrenFunction((a, b) => {
+          const ao = Number(a.data.child_order);
+          const bo = Number(b.data.child_order);
+          const aHas = Number.isFinite(ao);
+          const bHas = Number.isFinite(bo);
+          if (aHas && bHas && ao !== bo) return ao - bo;
+          if (aHas && !bHas) return -1;
+          if (!aHas && bHas) return 1;
+          const an = (a.data.name || '').toString();
+          const bn = (b.data.name || '').toString();
+          return an.localeCompare(bn);
+        });
+
+      chart.setCardHtml()
+        .setCardDim({ w: 200, h: 82, height_auto: true })
+        .setCardInnerHtmlCreator((d) => {
+          const name = d.data.data.name || 'Unknown';
+          const birth = d.data.data.birth_year || 'tbd';
+          const gender = d.data.data.gender || 'U';
+          const initials = name.split(' ').filter(Boolean).map(s => s[0]).join('').slice(0, 2).toUpperCase();
+          const genderClass = gender === 'M' ? 'male' : gender === 'F' ? 'female' : 'neutral';
+          const badge = d.data.main ? '<span class=\"card-badge\">You</span>' : '';
+          return `
+            <div class=\"card-inner\">
+              <div class=\"avatar ${genderClass}\">${initials || '?'}</div>
+              <div>
+                <div class=\"card-name\">${name}${badge}</div>
+                ${birth && birth.toLowerCase() !== 'tbd' ? `<div class=\"card-meta\">Born: ${birth}</div>` : ''}
+              </div>
+            </div>
+          `;
+        });
+
+      chart.updateTree({ initial: true, tree_position: 'main_to_middle', scale: 1.12 });
+      window.f3.handlers.zoomTo(chart.svg, 1.12);
+    }
+  </script>
+</body>
+</html>
