@@ -7,6 +7,5 @@ workers_dev = true
 GITHUB_OWNER = "tmanohar02"
 GITHUB_REPO = "family-tree-data"
 GITHUB_BRANCH = "main"
-PEOPLE_PATH = "people.csv"
-RELATIONSHIPS_PATH = "relationships.csv"
+DATA_BLOB_PATH = "canonical.enc.json"
 OPENAI_MODEL = "gpt-4.1-mini"

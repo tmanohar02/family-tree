@@ -16,7 +16,12 @@ export default {
 
       if (method === "GET" && url.pathname === "/api/tree") {
         const state = await loadState(env);
-        return withCors(json({ ok: true, commit: state.commitSha, people: state.people, relationships: state.relationships }));
+        return withCors(json({
+          ok: true,
+          commit: state.commitSha,
+          data_blob_path: state.dataBlobPath,
+          encrypted_data: state.encryptedPayload
+        }));
       }
 
       if (method === "POST" && url.pathname === "/api/changes/propose") {
@@ -138,20 +143,19 @@ async function loadState(env) {
   const ref = await githubApi(env, `repos/${owner}/${repo}/git/ref/heads/${branch}`);
   const commitSha = ref.object.sha;
 
-  const peoplePath = env.PEOPLE_PATH || "data/templates/people.csv";
-  const relPath = env.RELATIONSHIPS_PATH || "data/templates/relationships.csv";
-
-  const peopleFile = await getFileContent(env, peoplePath, branch);
-  const relsFile = await getFileContent(env, relPath, branch);
+  const dataBlobPath = env.DATA_BLOB_PATH || "canonical.enc.json";
+  const blobFile = await getFileContent(env, dataBlobPath, branch);
+  const canonical = await decryptCanonical(blobFile.content, env);
+  assert(typeof canonical.people_csv === "string", "people_csv missing in decrypted payload");
+  assert(typeof canonical.relationships_csv === "string", "relationships_csv missing in decrypted payload");
 
   return {
     commitSha,
-    peoplePath,
-    relPath,
-    peopleSha: peopleFile.sha,
-    relSha: relsFile.sha,
-    people: parseCsv(peopleFile.content),
-    relationships: parseCsv(relsFile.content)
+    dataBlobPath,
+    blobSha: blobFile.sha,
+    encryptedPayload: blobFile.content,
+    people: parseCsv(canonical.people_csv),
+    relationships: parseCsv(canonical.relationships_csv)
   };
 }
 
@@ -505,18 +509,12 @@ async function commitCsvFiles({ env, peopleCsv, relsCsv, commitMessage }) {
   const parentCommit = await githubApi(env, `repos/${owner}/${repo}/git/commits/${parentCommitSha}`);
   const baseTreeSha = parentCommit.tree.sha;
 
-  const peopleBlob = await githubApi(env, `repos/${owner}/${repo}/git/blobs`, {
-    method: "POST",
-    body: {
-      content: peopleCsv,
-      encoding: "utf-8"
-    }
-  });
+  const encryptedPayload = await encryptCanonical({ people_csv: peopleCsv, relationships_csv: relsCsv }, env);
 
-  const relBlob = await githubApi(env, `repos/${owner}/${repo}/git/blobs`, {
+  const dataBlob = await githubApi(env, `repos/${owner}/${repo}/git/blobs`, {
     method: "POST",
     body: {
-      content: relsCsv,
+      content: encryptedPayload,
       encoding: "utf-8"
     }
   });
@@ -527,16 +525,10 @@ async function commitCsvFiles({ env, peopleCsv, relsCsv, commitMessage }) {
       base_tree: baseTreeSha,
       tree: [
         {
-          path: env.PEOPLE_PATH || "data/templates/people.csv",
+          path: env.DATA_BLOB_PATH || "canonical.enc.json",
           mode: "100644",
           type: "blob",
-          sha: peopleBlob.sha
-        },
-        {
-          path: env.RELATIONSHIPS_PATH || "data/templates/relationships.csv",
-          mode: "100644",
-          type: "blob",
-          sha: relBlob.sha
+          sha: dataBlob.sha
         }
       ]
     }
@@ -560,6 +552,68 @@ async function commitCsvFiles({ env, peopleCsv, relsCsv, commitMessage }) {
   });
 
   return newCommit.sha;
+}
+
+async function encryptCanonical(payload, env) {
+  assert(env.DATA_KEY_B64, "DATA_KEY_B64 is not configured", 500);
+  const key = b64ToBytes(env.DATA_KEY_B64);
+  assert(key.length === 32, "DATA_KEY_B64 must decode to 32 bytes", 500);
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+  const encryptedBuffer = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, plaintext);
+  const encrypted = new Uint8Array(encryptedBuffer);
+  const envelope = {
+    version: 1,
+    alg: "AES-GCM-256",
+    iv: bytesToB64(iv),
+    data: bytesToB64(encrypted)
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+async function decryptCanonical(content, env) {
+  assert(env.DATA_KEY_B64, "DATA_KEY_B64 is not configured", 500);
+  const key = b64ToBytes(env.DATA_KEY_B64);
+  assert(key.length === 32, "DATA_KEY_B64 must decode to 32 bytes", 500);
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["decrypt"]);
+
+  let envelope;
+  try {
+    envelope = JSON.parse(content);
+  } catch {
+    throw withStatus("Canonical encrypted blob is not valid JSON", 500);
+  }
+  assert(envelope && envelope.version === 1, "Unsupported canonical blob version", 500);
+  assert(envelope.alg === "AES-GCM-256", "Unsupported canonical blob algorithm", 500);
+
+  const iv = b64ToBytes(envelope.iv || "");
+  const data = b64ToBytes(envelope.data || "");
+  let decrypted;
+  try {
+    const out = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, cryptoKey, data);
+    decrypted = new Uint8Array(out);
+  } catch {
+    throw withStatus("Failed to decrypt canonical blob", 500);
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(decrypted));
+  } catch {
+    throw withStatus("Failed to decrypt canonical blob", 500);
+  }
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function bytesToB64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
 }
 
 async function triggerPublishWorkflow(env, commitSha) {
