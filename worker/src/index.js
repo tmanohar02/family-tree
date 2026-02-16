@@ -24,6 +24,19 @@ export default {
         }));
       }
 
+      if (method === "GET" && url.pathname === "/api/tree/chart") {
+        requireAuth(request, env);
+        const state = await loadState(env);
+        const mainId = env.MAIN_PERSON_ID || "P0004";
+        const chartData = toFamilyChartData(state.people, state.relationships, mainId);
+        return withCors(json({
+          ok: true,
+          commit: state.commitSha,
+          main_person_id: mainId,
+          data: chartData
+        }));
+      }
+
       if (method === "POST" && url.pathname === "/api/changes/propose") {
         requireAuth(request, env);
         const body = await parseJson(request);
@@ -42,7 +55,7 @@ export default {
         assert(Array.isArray(body?.operations), "operations array is required");
 
         const state = await loadState(env);
-        const result = applyOperations(state, body.operations);
+        const result = applyOperations(state, normalizeIncomingOperations(body.operations));
 
         return withCors(json({
           ok: true,
@@ -62,7 +75,7 @@ export default {
         assert(Array.isArray(body?.operations), "operations array is required");
 
         const state = await loadState(env);
-        const result = applyOperations(state, body.operations);
+        const result = applyOperations(state, normalizeIncomingOperations(body.operations));
 
         const peopleCsv = stringifyCsv(result.nextPeople, ["person_id", "full_name", "birth_year", "gender", "child_order"]);
         const relsCsv = stringifyCsv(result.nextRelationships, ["relation_id", "person1_id", "person2_id", "relation_type", "relation_date", "end_date"]);
@@ -72,16 +85,34 @@ export default {
           : "data: apply natural-language update";
 
         const commitSha = await commitCsvFiles({ env, peopleCsv, relsCsv, commitMessage });
-
-        if (env.PUBLISH_WORKFLOW_FILE && env.PUBLISH_WORKFLOW_FILE.trim()) {
-          await triggerPublishWorkflow(env, commitSha);
-        }
+        const deployRequested = body.deploy !== false;
+        const publish = await maybeTriggerPublish(env, commitSha, deployRequested);
 
         return withCors(json({
           ok: true,
           commit_sha: commitSha,
           delta: result.delta,
-          warnings: result.warnings
+          warnings: result.warnings,
+          publish
+        }));
+      }
+
+      if (method === "POST" && url.pathname === "/api/publish") {
+        requireAuth(request, env);
+        const body = await parseJson(request).catch(() => ({}));
+        const state = await loadState(env);
+        const commitSha = typeof body?.commit_sha === "string" && body.commit_sha.trim()
+          ? body.commit_sha.trim()
+          : state.commitSha;
+        const publish = await maybeTriggerPublish(env, commitSha, true);
+        if (!publish.triggered) {
+          throw withStatus(`Publish skipped: ${publish.skipped_reason || "not configured"}`, 400);
+        }
+
+        return withCors(json({
+          ok: true,
+          commit_sha: commitSha,
+          publish
         }));
       }
 
@@ -181,6 +212,53 @@ function parseCsv(text) {
   });
 }
 
+function toFamilyChartData(people, relationships, mainPersonId) {
+  const byId = new Map();
+  for (const p of people) {
+    if (!p.person_id) continue;
+    const childOrderRaw = String(p.child_order ?? "").trim();
+    const childOrder = childOrderRaw ? Number(childOrderRaw) : null;
+    byId.set(p.person_id, {
+      id: p.person_id,
+      data: {
+        name: p.full_name || "",
+        birth_year: p.birth_year || "",
+        gender: p.gender || "U",
+        child_order: Number.isFinite(childOrder) ? childOrder : null
+      },
+      rels: {
+        parents: [],
+        spouses: [],
+        children: []
+      }
+    });
+  }
+
+  for (const r of relationships) {
+    const p1 = byId.get(r.person1_id);
+    const p2 = byId.get(r.person2_id);
+    if (!p1 || !p2) continue;
+
+    if (r.relation_type === "parent") {
+      pushUnique(p1.rels.children, p2.id);
+      pushUnique(p2.rels.parents, p1.id);
+    } else if (r.relation_type === "spouse") {
+      pushUnique(p1.rels.spouses, p2.id);
+      pushUnique(p2.rels.spouses, p1.id);
+    }
+  }
+
+  const all = Array.from(byId.values());
+  return [
+    ...all.filter((row) => row.id === mainPersonId),
+    ...all.filter((row) => row.id !== mainPersonId)
+  ];
+}
+
+function pushUnique(arr, value) {
+  if (!arr.includes(value)) arr.push(value);
+}
+
 function parseCsvLine(line) {
   const out = [];
   let cur = "";
@@ -203,6 +281,44 @@ function parseCsvLine(line) {
   }
   out.push(cur);
   return out;
+}
+
+function normalizeIncomingOperations(operations) {
+  return operations.map((raw) => {
+    const op = { ...raw };
+    if (!op.op && typeof op.operation === "string") op.op = op.operation;
+
+    // Accept shorthand relationship objects from the model and normalize them.
+    if (!op.op && op.relation_type && op.person1_id && op.person2_id) {
+      op.op = "add_relationship";
+    }
+    if (op.op === "add_relationship" && !op.relationship) {
+      op.relationship = {
+        relation_id: op.relation_id,
+        person1_id: op.person1_id,
+        person2_id: op.person2_id,
+        relation_type: op.relation_type,
+        relation_date: op.relation_date,
+        end_date: op.end_date
+      };
+    }
+
+    // Accept shorthand person objects from the model and normalize them.
+    if (!op.op && op.full_name) {
+      op.op = "add_person";
+    }
+    if (op.op === "add_person" && !op.person) {
+      op.person = {
+        person_id: op.person_id,
+        full_name: op.full_name,
+        birth_year: op.birth_year,
+        gender: op.gender,
+        child_order: op.child_order
+      };
+    }
+
+    return op;
+  });
 }
 
 function stringifyCsv(rows, headers) {
@@ -231,8 +347,10 @@ function applyOperations(state, operations) {
 
   const peopleById = new Map(people.map((p) => [p.person_id, p]));
   const relById = new Map(relationships.map((r) => [r.relation_id, r]));
+  const personIdAlias = new Map();
 
   const warnings = [];
+  const resolvePersonId = (id) => personIdAlias.get(id) || id;
 
   for (const op of operations) {
     assert(op && typeof op === "object", "operation must be object");
@@ -240,8 +358,16 @@ function applyOperations(state, operations) {
 
     if (kind === "add_person") {
       const person = op.person || {};
-      const personId = person.person_id || nextId("P", peopleById.keys());
-      assert(!peopleById.has(personId), `person_id already exists: ${personId}`);
+      const requestedId = person.person_id || "";
+      let personId = requestedId || nextId("P", peopleById.keys());
+      if (peopleById.has(personId)) {
+        const generated = nextId("P", peopleById.keys());
+        if (requestedId) {
+          personIdAlias.set(requestedId, generated);
+          warnings.push(`person_id_reassigned:${requestedId}->${generated}`);
+        }
+        personId = generated;
+      }
 
       const row = {
         person_id: personId,
@@ -272,16 +398,22 @@ function applyOperations(state, operations) {
 
     if (kind === "add_relationship") {
       const rel = op.relationship || {};
-      const relationId = rel.relation_id || nextId("R", relById.keys());
-      assert(!relById.has(relationId), `relation_id already exists: ${relationId}`);
-      assert(peopleById.has(rel.person1_id), `person1_id not found: ${rel.person1_id}`);
-      assert(peopleById.has(rel.person2_id), `person2_id not found: ${rel.person2_id}`);
+      let relationId = rel.relation_id || nextId("R", relById.keys());
+      if (relById.has(relationId)) {
+        const requested = relationId;
+        relationId = nextId("R", relById.keys());
+        warnings.push(`relation_id_reassigned:${requested}->${relationId}`);
+      }
+      const person1Id = resolvePersonId(rel.person1_id);
+      const person2Id = resolvePersonId(rel.person2_id);
+      assert(peopleById.has(person1Id), `person1_id not found: ${person1Id}`);
+      assert(peopleById.has(person2Id), `person2_id not found: ${person2Id}`);
       assert(["parent", "spouse"].includes(rel.relation_type), "relation_type must be parent or spouse");
 
       const row = {
         relation_id: relationId,
-        person1_id: rel.person1_id,
-        person2_id: rel.person2_id,
+        person1_id: person1Id,
+        person2_id: person2Id,
         relation_type: rel.relation_type,
         relation_date: rel.relation_date || "",
         end_date: rel.end_date || ""
@@ -300,7 +432,11 @@ function applyOperations(state, operations) {
 
       for (const key of ["person1_id", "person2_id", "relation_type", "relation_date", "end_date"]) {
         if (Object.prototype.hasOwnProperty.call(changes, key)) {
-          row[key] = changes[key] ?? "";
+          if (key === "person1_id" || key === "person2_id") {
+            row[key] = resolvePersonId(changes[key] ?? "");
+          } else {
+            row[key] = changes[key] ?? "";
+          }
         }
       }
 
@@ -616,11 +752,47 @@ function bytesToB64(bytes) {
   return btoa(bin);
 }
 
-async function triggerPublishWorkflow(env, commitSha) {
-  const owner = env.GITHUB_OWNER;
-  const repo = env.GITHUB_REPO;
-  const branch = env.GITHUB_BRANCH || "main";
-  const workflow = env.PUBLISH_WORKFLOW_FILE;
+function getPublishConfig(env) {
+  const workflow = (env.PUBLISH_WORKFLOW_FILE || "").trim();
+  return {
+    owner: (env.PUBLISH_GITHUB_OWNER || env.GITHUB_OWNER || "").trim(),
+    repo: (env.PUBLISH_GITHUB_REPO || "").trim(),
+    branch: (env.PUBLISH_GITHUB_BRANCH || "main").trim(),
+    workflow
+  };
+}
+
+async function maybeTriggerPublish(env, commitSha, deployRequested) {
+  if (!deployRequested) {
+    return { requested: false, triggered: false, skipped_reason: "deploy disabled by request" };
+  }
+
+  const cfg = getPublishConfig(env);
+  if (!cfg.workflow) {
+    return { requested: true, triggered: false, skipped_reason: "PUBLISH_WORKFLOW_FILE is not configured" };
+  }
+  if (!cfg.repo) {
+    return { requested: true, triggered: false, skipped_reason: "PUBLISH_GITHUB_REPO is not configured" };
+  }
+  if (!cfg.owner) {
+    return { requested: true, triggered: false, skipped_reason: "PUBLISH_GITHUB_OWNER is not configured" };
+  }
+
+  await triggerPublishWorkflow(env, {
+    owner: cfg.owner,
+    repo: cfg.repo,
+    branch: cfg.branch || "main",
+    workflow: cfg.workflow,
+    commitSha
+  });
+  return { requested: true, triggered: true };
+}
+
+async function triggerPublishWorkflow(env, cfg) {
+  const owner = cfg.owner;
+  const repo = cfg.repo;
+  const branch = cfg.branch;
+  const workflow = cfg.workflow;
 
   await githubApi(env, `repos/${owner}/${repo}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
     method: "POST",

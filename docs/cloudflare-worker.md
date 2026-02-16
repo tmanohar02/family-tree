@@ -35,9 +35,11 @@ Configured in `worker/wrangler.toml`:
 - `GITHUB_OWNER`
 - `GITHUB_REPO`
 - `GITHUB_BRANCH`
-- `PEOPLE_PATH`
-- `RELATIONSHIPS_PATH`
+- `DATA_BLOB_PATH`
 - `OPENAI_MODEL`
+- `PUBLISH_GITHUB_OWNER` (optional; defaults to `GITHUB_OWNER`)
+- `PUBLISH_GITHUB_REPO` (required for publish trigger)
+- `PUBLISH_GITHUB_BRANCH` (optional; defaults to `main`)
 
 ## API endpoints
 
@@ -63,9 +65,14 @@ Configured in `worker/wrangler.toml`:
   - `warnings`
 
 ### `POST /api/changes/apply` (auth required)
-- Input: `{ "operations": [...], "commit_message": "optional" }`
+- Input: `{ "operations": [...], "commit_message": "optional", "deploy": true|false }`
 - Applies operations, validates, writes both CSVs in one Git commit to `main`.
-- Output: `commit_sha`, `delta`, `warnings`.
+- Output: `commit_sha`, `delta`, `warnings`, `publish`.
+
+### `POST /api/publish` (auth required)
+- Input: `{ "commit_sha": "optional" }`
+- Triggers configured GitHub Actions publish workflow.
+- If `commit_sha` is omitted, uses latest canonical commit.
 
 ## Operation schema (current)
 
